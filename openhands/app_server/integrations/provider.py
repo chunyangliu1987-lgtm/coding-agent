@@ -329,12 +329,15 @@ class ProviderHandler:
         repository: str,
         query: str,
         per_page: int = 30,
+        page: int = 1,
     ) -> list[Branch]:
         """Search for branches within a repository using the appropriate provider service."""
         if selected_provider:
             service = self.get_service(selected_provider)
             try:
-                return await service.search_branches(repository, query, per_page)
+                return await service.search_branches(
+                    repository, query, per_page, page=page
+                )
             except Exception as e:
                 logger.warning(
                     f'Error searching branches from selected provider {selected_provider}: {e}'
@@ -345,7 +348,7 @@ class ProviderHandler:
         try:
             repo_details = await self.verify_repo_provider(repository)
             service = self.get_service(repo_details.git_provider)
-            return await service.search_branches(repository, query, per_page)
+            return await service.search_branches(repository, query, per_page, page=page)
         except Exception as e:
             logger.warning(f'Error searching branches for {repository}: {e}')
             return []
@@ -457,6 +460,7 @@ class ProviderHandler:
         specified_provider: ProviderType | None = None,
         page: int = 1,
         per_page: int = 30,
+        query: str | None = None,
     ) -> PaginatedBranchesResponse:
         """Get branches for a repository
 
@@ -465,6 +469,7 @@ class ProviderHandler:
             specified_provider: Optional provider type to use
             page: Page number for pagination (default: 1)
             per_page: Number of branches per page (default: 30)
+            query: Optional branch name search query
 
         Returns:
             A paginated response with branches for the repository
@@ -472,7 +477,9 @@ class ProviderHandler:
         if specified_provider:
             try:
                 service = self.get_service(specified_provider)
-                return await service.get_paginated_branches(repository, page, per_page)
+                return await service.get_paginated_branches(
+                    repository, page, per_page, query=query
+                )
             except Exception as e:
                 logger.warning(
                     f'Error fetching branches from {specified_provider}: {e}'
@@ -481,7 +488,9 @@ class ProviderHandler:
         for provider in self.provider_tokens:
             try:
                 service = self.get_service(provider)
-                return await service.get_paginated_branches(repository, page, per_page)
+                return await service.get_paginated_branches(
+                    repository, page, per_page, query=query
+                )
             except Exception as e:
                 logger.warning(f'Error fetching branches from {provider}: {e}')
 
