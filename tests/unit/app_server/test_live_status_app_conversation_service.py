@@ -175,6 +175,17 @@ class TestLiveStatusAppConversationService:
         self.mock_event_service = Mock()
         self.mock_httpx_client = Mock()
         self.mock_pending_message_service = Mock()
+        # Async methods on the pending message service must be AsyncMock so they
+        # can be awaited inside _process_pending_messages (which now runs unconditionally).
+        self.mock_pending_message_service.update_conversation_id = AsyncMock(
+            return_value=0
+        )
+        self.mock_pending_message_service.get_pending_messages = AsyncMock(
+            return_value=[]
+        )
+        self.mock_pending_message_service.delete_messages_for_conversation = AsyncMock(
+            return_value=0
+        )
 
         # Create service instance
         self.service = LiveStatusAppConversationService(
@@ -2573,6 +2584,17 @@ class TestPluginHandling:
         self.mock_event_service = Mock()
         self.mock_httpx_client = Mock()
         self.mock_pending_message_service = Mock()
+        # Async methods on the pending message service must be AsyncMock so they
+        # can be awaited inside _process_pending_messages (which now runs unconditionally).
+        self.mock_pending_message_service.update_conversation_id = AsyncMock(
+            return_value=0
+        )
+        self.mock_pending_message_service.get_pending_messages = AsyncMock(
+            return_value=[]
+        )
+        self.mock_pending_message_service.delete_messages_for_conversation = AsyncMock(
+            return_value=0
+        )
 
         # Create service instance
         self.service = LiveStatusAppConversationService(
@@ -3235,6 +3257,17 @@ class TestLoadHooksFromWorkspace:
         self.mock_event_service = Mock()
         self.mock_httpx_client = AsyncMock()
         self.mock_pending_message_service = Mock()
+        # Async methods on the pending message service must be AsyncMock so they
+        # can be awaited inside _process_pending_messages (which now runs unconditionally).
+        self.mock_pending_message_service.update_conversation_id = AsyncMock(
+            return_value=0
+        )
+        self.mock_pending_message_service.get_pending_messages = AsyncMock(
+            return_value=[]
+        )
+        self.mock_pending_message_service.delete_messages_for_conversation = AsyncMock(
+            return_value=0
+        )
 
         # Create service instance
         self.service = LiveStatusAppConversationService(
