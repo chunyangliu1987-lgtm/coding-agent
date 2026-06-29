@@ -257,6 +257,9 @@ class AppConversationServiceBase(AppConversationService, ABC):
         yield task
         await self.clone_or_init_git_repo(task, workspace, sandbox)
 
+        # Clone dependency repos alongside the main repo
+        await self._clone_dependency_repos(task.request, workspace, sandbox)
+
         # Compute the project root — the cloned repo directory when a repo is
         # selected, or the sandbox working_dir otherwise.  This must be used
         # for all .openhands/ features (setup.sh, pre-commit.sh, skills).
@@ -513,6 +516,73 @@ printf 'password=%s\\n' "$token"
             _logger.warning(
                 f'Azure DevOps git credential helper setup failed: {result.stderr}'
             )
+
+    async def _clone_dependency_repos(
+        self,
+        request,
+        workspace: AsyncRemoteWorkspace,
+        sandbox: SandboxInfo | None = None,
+    ) -> None:
+        """Clone dependency repositories into the workspace alongside the main repo.
+
+        Each dependency repo is cloned into ``{working_dir}/{dep.name}``.
+        Failures for individual dependency repos are logged but do not
+        prevent the conversation from starting.
+        """
+        dep_repos = request.dependency_repos
+        if not dep_repos or not isinstance(dep_repos, list):
+            return
+
+        _logger.info(
+            f'Cloning {len(dep_repos)} dependency repo(s): '
+            f'{[d.repo for d in dep_repos]}'
+        )
+
+        for dep in dep_repos:
+            try:
+                remote_url = await self.user_context.get_authenticated_git_url(dep.repo)
+                if not remote_url:
+                    _logger.warning(
+                        f'Could not get authenticated URL for dependency '
+                        f'repo "{dep.repo}" — skipping'
+                    )
+                    continue
+
+                dir_name = dep.clone_dir_name()
+                quoted_url = shlex.quote(remote_url)
+                quoted_dir = shlex.quote(dir_name)
+                git_dir = Path(workspace.working_dir) / dir_name
+
+                _logger.debug(f'Cloning dependency repo {dep.repo} → {git_dir}')
+                result = await workspace.execute_command(
+                    f'git clone {quoted_url} {quoted_dir}',
+                    workspace.working_dir,
+                    120,
+                )
+                if result.exit_code:
+                    _logger.warning(
+                        f'Failed to clone dependency repo "{dep.repo}": {result.stderr}'
+                    )
+                    continue
+
+                if dep.ref:
+                    ensure_valid_git_branch_name(dep.ref)
+                    checkout_result = await workspace.execute_command(
+                        f'git checkout {shlex.quote(dep.ref)}', git_dir
+                    )
+                    if checkout_result.exit_code:
+                        _logger.warning(
+                            f'Failed to checkout ref "{dep.ref}" for '
+                            f'dependency repo "{dep.repo}": '
+                            f'{checkout_result.stderr}'
+                        )
+
+                _logger.info(f'Cloned dependency repo "{dep.repo}" → {git_dir}')
+            except Exception as e:
+                _logger.warning(
+                    f'Error cloning dependency repo "{dep.repo}": {e}',
+                    exc_info=True,
+                )
 
     async def maybe_run_setup_script(
         self,

@@ -109,6 +109,35 @@ class PluginSpec(PluginSource):
         )
 
 
+class DependencyRepo(OpenHandsModel):
+    """Specification for a dependency repository to clone alongside the main repo.
+
+    Each entry describes an additional repository the agent should
+    have access to. The repos are cloned into the workspace alongside
+    the primary repository.
+    """
+
+    name: str = Field(
+        ...,
+        description='Short alias for this dependency (e.g. "frontend", "backend")',
+        min_length=1,
+        max_length=64,
+    )
+    repo: str = Field(
+        ...,
+        description='Repository path in owner/repo format (e.g. "OpenHands/software-agent-sdk")',
+        min_length=1,
+    )
+    ref: str | None = Field(
+        default=None,
+        description='Optional branch, tag, or SHA to checkout',
+    )
+
+    def clone_dir_name(self) -> str:
+        """Directory name used when cloning into the workspace."""
+        return self.name
+
+
 class AppConversationInfo(BaseModel):
     """Conversation info which does not contain status."""
 
@@ -120,6 +149,7 @@ class AppConversationInfo(BaseModel):
     selected_repository: str | None = None
     selected_branch: str | None = None
     git_provider: ProviderType | None = None
+    dependency_repos: list[DependencyRepo] | None = None
     title: str | None = None
     trigger: ConversationTrigger | None = None
     pr_number: list[int] = Field(default_factory=list)
@@ -215,6 +245,7 @@ class AppConversationStartRequest(OpenHandsModel):
     selected_repository: str | None = None
     selected_branch: str | None = None
     git_provider: ProviderType | None = None
+    dependency_repos: list[DependencyRepo] | None = None
     suggested_task: SuggestedTask | None = None
     title: str | None = None
     trigger: ConversationTrigger | None = None
@@ -257,6 +288,7 @@ class AppConversationUpdateRequest(BaseModel):
     selected_repository: str | None = None
     selected_branch: str | None = None
     git_provider: ProviderType | None = None
+    dependency_repos: list[DependencyRepo] | None = None
 
 
 class AppConversationStartTaskStatus(Enum):
