@@ -115,6 +115,23 @@ export type SkillInfo = {
 
 export type SettingsScope = "personal" | "org";
 
+export type MarketplaceRegistration = {
+  name: string;
+  source: string;
+  ref?: string;
+  repo_path?: string;
+  auto_load?: boolean;
+  scope: "instance" | "org" | "personal";
+};
+
+export interface SkillWithState extends SkillInfo {
+  id: string;
+  repository: string;
+  scope: "instance" | "org" | "personal";
+  isEnabled: boolean;
+  isAutoLoad: boolean;
+}
+
 export type Settings = {
   llm_model: string;
   llm_base_url: string;
@@ -150,5 +167,8 @@ export type Settings = {
   conversation_settings_schema?: SettingsSchema | null;
   conversation_settings?: Record<string, SettingsValue> | null;
   sandbox_grouping_strategy?: SandboxGroupingStrategy;
+  registered_marketplaces?: MarketplaceRegistration[];
+  inherited_marketplaces?: MarketplaceRegistration[];
+  updated_at?: string;
   default_sandbox_spec_id?: string | null;
 };

@@ -4,13 +4,14 @@ This module provides the V1 API routes for user settings under /api/v1/settings.
 """
 
 import asyncio
+import json
 import os
 from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from openhands.analytics import get_analytics_service
 from openhands.app_server.integrations.provider import (
@@ -28,7 +29,9 @@ from openhands.app_server.settings.llm_profiles import (
 )
 from openhands.app_server.settings.settings_models import (
     GETSettingsModel,
+    MarketplaceRegistration,
     Settings,
+    validate_and_convert_marketplaces,
 )
 from openhands.app_server.settings.settings_store import SettingsStore
 from openhands.app_server.user_auth import (
@@ -55,6 +58,178 @@ from openhands.sdk.settings import (
 LITE_LLM_API_URL = os.environ.get(
     'LITE_LLM_API_URL', 'https://llm-proxy.app.all-hands.dev'
 )
+
+
+def _get_instance_default_marketplaces() -> list[dict[str, Any]]:
+    """Get instance-level default marketplaces from environment variable.
+
+    Format: comma-separated list of marketplace definitions
+    Each definition: source[#name[#ref[#repo_path]]]
+    Example: github:openhands/extensions#default#main#marketplaces/default
+    Or JSON-encoded: [{"source":"github:...","name":"...","ref":"..."}]
+
+    Each parsed marketplace is validated using MarketplaceRegistration model.
+    Invalid entries are logged and skipped.
+    """
+    env_value = os.environ.get('INSTANCE_DEFAULT_MARKETPLACES', '')
+    if not env_value:
+        return []
+
+    parsed_marketplaces = []
+    for definition in env_value.split(','):
+        definition = definition.strip()
+        if not definition:
+            continue
+
+        # Try JSON format first
+        if definition.startswith('[') or definition.startswith('{'):
+            try:
+                parsed = json.loads(definition)
+                if isinstance(parsed, list):
+                    for mp in parsed:
+                        parsed_marketplaces.append(
+                            {**mp, 'auto_load': mp.get('auto_load', True)}
+                        )
+                elif isinstance(parsed, dict):
+                    parsed_marketplaces.append(
+                        {**parsed, 'auto_load': parsed.get('auto_load', True)}
+                    )
+                continue
+            except json.JSONDecodeError:
+                pass
+
+        # Parse # separator format
+        # source#name#ref#repo_path
+        parts = definition.split('#')
+        source = parts[0]
+
+        marketplace: dict[str, Any] = {'source': source}
+        if len(parts) > 1 and parts[1]:
+            marketplace['name'] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            marketplace['ref'] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            marketplace['repo_path'] = parts[3]
+        marketplace['auto_load'] = True
+
+        parsed_marketplaces.append(marketplace)
+
+    # Validate each marketplace using MarketplaceRegistration model
+    validated_marketplaces = []
+    for mp_dict in parsed_marketplaces:
+        # Add scope for instance defaults
+        mp_dict.setdefault('scope', 'instance')
+
+        # Auto-generate name from source if not provided
+        if 'name' not in mp_dict or not mp_dict['name']:
+            source = mp_dict.get('source', '')
+            # Extract repo name from source (e.g., "github:owner/repo" -> "repo")
+            if ':' in source:
+                mp_dict['name'] = source.split(':')[-1].split('/')[-1]
+            elif '/' in source:
+                mp_dict['name'] = source.split('/')[-1]
+            else:
+                mp_dict['name'] = source
+
+        try:
+            mp = MarketplaceRegistration.model_validate(mp_dict)
+            validated_marketplaces.append(mp.model_dump())
+        except ValidationError as e:
+            logger.warning(
+                f'Invalid marketplace in INSTANCE_DEFAULT_MARKETPLACES: '
+                f'{mp_dict}, error: {e}'
+            )
+            continue
+
+    return validated_marketplaces
+
+
+def _merge_marketplaces(
+    instance_marketplaces: list[dict[str, Any]],
+    org_marketplaces: list[dict[str, Any]],
+    user_marketplaces: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Merge marketplaces from different scopes with proper precedence.
+
+    Composition order (additive): Instance -> Org -> User
+    Users cannot override instance or org marketplace settings.
+
+    Args:
+        instance_marketplaces: From INSTANCE_DEFAULT_MARKETPLACES env var
+        org_marketplaces: From org registered_marketplaces column
+        user_marketplaces: From user registered_marketplaces column
+
+    Returns:
+        Tuple of (inherited_marketplaces, personal_marketplaces)
+        inherited_marketplaces includes instance + org (read-only)
+        personal_marketplaces is user-defined (editable)
+    """
+    inherited: list[dict[str, Any]] = []
+    personal: list[dict[str, Any]] = []
+
+    # Build lookup by source for deduplication
+    # User settings take precedence over org, org over instance
+    seen_sources: set[str] = set()
+
+    # Helper to add marketplace with deduplication check
+    def add_inherited(mp: dict[str, Any], scope: str) -> None:
+        source = mp.get('source', '')
+        if not source:
+            return
+        if source not in seen_sources:
+            inherited.append({**mp, 'scope': scope})
+            seen_sources.add(source)
+            logger.debug(f'Added {scope} marketplace: {source}')
+        elif scope == 'org':
+            # Override: update existing with org values
+            for i, imp in enumerate(inherited):
+                if imp.get('source') == source:
+                    inherited[i] = {**imp, **mp, 'scope': 'org'}
+                    logger.debug(f'{scope} marketplace overrides existing: {source}')
+                    break
+
+    # Instance defaults first (lowest priority)
+    for mp in instance_marketplaces:
+        add_inherited(mp, 'instance')
+
+    # Org settings (override instance)
+    for mp in org_marketplaces:
+        add_inherited(mp, 'org')
+
+    # User settings - users can only add NEW marketplaces
+    for mp in user_marketplaces:
+        source = mp.get('source', '')
+        if not source:
+            continue
+
+        if source in seen_sources:
+            # Check if it's an immutable scope (instance/org)
+            existing = next(
+                (imp for imp in inherited if imp.get('source') == source), None
+            )
+            if existing and existing.get('scope') in ('instance', 'org'):
+                # Cannot override instance or org marketplaces - skip silently
+                logger.debug(
+                    f'User marketplace skipped (immutable {existing["scope"]}): {source}'
+                )
+                continue
+            # Else: overriding personal marketplace, continue to update it
+
+        # Add to personal (only if new source or overriding personal)
+        if source not in seen_sources:
+            personal.append({**mp, 'scope': 'personal'})
+            seen_sources.add(source)
+            logger.debug(f'Added personal marketplace: {source}')
+        else:
+            # Updating existing personal marketplace
+            for i, pp in enumerate(personal):
+                if pp.get('source') == source:
+                    personal[i] = {**pp, **mp, 'scope': 'personal'}
+                    logger.debug(f'Updated personal marketplace: {source}')
+                    break
+
+    return inherited, personal
+
 
 # Create router with /api/v1/settings prefix
 router = APIRouter(
@@ -98,6 +273,7 @@ async def load_settings(
     settings_store: SettingsStore = Depends(get_user_settings_store),
     settings: Settings = Depends(get_user_settings),
     secrets_store: SecretsStore = Depends(get_secrets_store),
+    user_id: str | None = Depends(get_user_id),
 ) -> GETSettingsModel | JSONResponse:
     """Load user settings.
 
@@ -158,6 +334,29 @@ async def load_settings(
         resp_llm.api_key = None
         settings_with_token_data.search_api_key = None
         settings_with_token_data.sandbox_api_key = None
+
+        # Marketplace composition: Instance -> Org -> User
+        instance_defaults = _get_instance_default_marketplaces()
+        org_marketplaces = await settings_store.get_org_marketplaces(user_id)
+        user_marketplaces = [
+            mp.model_dump() for mp in (settings.registered_marketplaces or [])
+        ]
+
+        # Merge marketplaces with proper precedence
+        inherited, personal = _merge_marketplaces(
+            instance_defaults, org_marketplaces, user_marketplaces
+        )
+
+        # Validate and convert merged marketplaces
+        settings_with_token_data.inherited_marketplaces = (
+            validate_and_convert_marketplaces(
+                inherited, source_name='inherited marketplaces'
+            )
+        )
+        settings_with_token_data.registered_marketplaces = (
+            validate_and_convert_marketplaces(personal, source_name='user marketplaces')
+        )
+
         return settings_with_token_data
     except Exception as e:
         logger.warning(f'Invalid token: {e}')
@@ -255,6 +454,13 @@ async def store_settings(
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={'message': 'Settings stored'},
+        )
+    except ValueError as e:
+        # Validation errors (e.g., invalid marketplace data) return 400
+        logger.warning(f'Settings validation error: {e}')
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={'error': str(e)},
         )
     except Exception as e:
         logger.warning(f'Something went wrong storing settings: {e}')

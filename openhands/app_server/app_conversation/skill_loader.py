@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from openhands.app_server.integrations.provider import ProviderHandler, ProviderType
 from openhands.app_server.integrations.service_types import AuthenticationError
 from openhands.app_server.sandbox.sandbox_models import SandboxInfo
+from openhands.app_server.settings.settings_models import MarketplaceRegistration
 from openhands.app_server.user.user_context import UserContext
 from openhands.sdk.skills import KeywordTrigger, Skill, TaskTrigger
 
@@ -400,6 +401,7 @@ async def load_skills_from_agent_server(
     load_user: bool = True,
     load_project: bool = True,
     load_org: bool = True,
+    registered_marketplaces: list[MarketplaceRegistration] | None = None,
 ) -> list[Skill]:
     """Load all skills from the agent-server.
 
@@ -416,12 +418,21 @@ async def load_skills_from_agent_server(
         load_user: Whether to load user skills (default: True)
         load_project: Whether to load project skills (default: True)
         load_org: Whether to load organization skills (default: True)
+        registered_marketplaces: List of marketplace registrations (optional)
 
     Returns:
         List of Skill objects merged from all sources.
         Returns empty list on error.
     """
     try:
+        # Convert marketplace registrations to API payload format
+        # Preserve semantic distinction: None = not specified, [] = explicitly empty
+        marketplace_payloads = (
+            [reg.model_dump() for reg in registered_marketplaces]
+            if registered_marketplaces is not None
+            else None
+        )
+
         # Build request payload. ``org_configs`` is the current list form;
         # ``org_config`` (the first entry) is kept for backward compatibility
         # with older agent-server images that only understand a single config.
@@ -436,6 +447,7 @@ async def load_skills_from_agent_server(
             ),
             'org_config': org_configs[0].model_dump() if org_configs else None,
             'sandbox_config': sandbox_config.model_dump() if sandbox_config else None,
+            'registered_marketplaces': marketplace_payloads,
         }
 
         # Build headers
