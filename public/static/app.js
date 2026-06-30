@@ -1,9 +1,10 @@
-// 小象 Agent 前端逻辑
+// 小象 Agent 前端逻辑 · Genspark 风格
 const App = {
   agents: [],
   currentAgent: null,
   currentConv: null,
   streaming: false,
+  homeSelectedAgent: 'general', // 首页当前选中的 agent
 }
 
 const $ = (sel) => document.querySelector(sel)
@@ -17,18 +18,23 @@ const el = (tag, cls, html) => {
 marked.setOptions({ breaks: true, gfm: true })
 const renderMd = (text) => DOMPurify.sanitize(marked.parse(text || ''))
 
+// FontAwesome 没有免费的 elephant 图标，做映射
+function iconFix(icon) {
+  return icon === 'fa-elephant' ? 'fa-wand-magic-sparkles' : icon
+}
+
 // ---------- 初始化 ----------
 async function init() {
   App.agents = await fetch('/api/agents').then((r) => r.json())
-  bindEvents()
+  bindGlobalEvents()
   await loadConversations()
-  showAgentPicker()
+  showHome()
 }
 
-function bindEvents() {
-  $('#new-chat-btn').onclick = showAgentPicker
-  $('#switch-agent-btn').onclick = showAgentPicker
-  $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('collapsed')
+function bindGlobalEvents() {
+  $('#new-chat-btn').onclick = showHome
+  $('#home-btn').onclick = showHome
+  $('#mobile-menu').onclick = () => $('#sidebar').classList.toggle('open')
   $('#send-btn').onclick = sendMessage
   const input = $('#input')
   input.addEventListener('keydown', (e) => {
@@ -37,67 +43,139 @@ function bindEvents() {
       sendMessage()
     }
   })
-  input.addEventListener('input', () => {
-    input.style.height = 'auto'
-    input.style.height = Math.min(input.scrollHeight, 160) + 'px'
-  })
+  input.addEventListener('input', () => autoGrow(input))
 }
 
-// ---------- Agent 选择首页 ----------
-function showAgentPicker() {
+function autoGrow(t) {
+  t.style.height = 'auto'
+  t.style.height = Math.min(t.scrollHeight, 160) + 'px'
+}
+
+// ============================================================
+//  首页 (Genspark 风格：大标题 + 大输入框 + 圆形 Agent 入口)
+// ============================================================
+function showHome() {
   App.currentConv = null
+  App.currentAgent = null
   $('#composer').classList.add('hidden')
-  $('#current-agent').innerHTML = '<span class="text-gray-400">选择一个智能体</span>'
+  $('#current-agent').innerHTML = ''
   highlightConv(null)
+  $('#sidebar').classList.remove('open')
 
   const content = $('#content')
   content.innerHTML = ''
-  const wrap = el('div', 'max-w-4xl mx-auto px-6 py-10 fade-in')
+  const wrap = el('div', 'min-h-full flex flex-col items-center justify-center px-4 py-10')
 
-  wrap.appendChild(
-    el(
-      'div',
-      'text-center mb-8',
-      `<div class="text-5xl mb-3">🐘</div>
-       <h2 class="text-2xl font-bold text-gray-800">欢迎使用小象 Agent</h2>
-       <p class="text-gray-500 mt-2">选择一个智能体，开启你的 AI 协作之旅</p>`
-    )
+  // 标题
+  const hero = el('div', 'text-center mb-8 fade-up')
+  hero.style.animationDelay = '0.02s'
+  hero.innerHTML = `
+    <div class="text-5xl mb-4">🐘</div>
+    <h1 class="text-[34px] sm:text-[40px] font-extrabold tracking-tight"><span class="gradient-text">小象 Agent</span></h1>
+    <p class="text-gray-500 mt-3 text-[15px]">你的中文 AI 超级智能体 · 提问、创作、研究，一站搞定</p>`
+  wrap.appendChild(hero)
+
+  // 大输入框
+  const boxWrap = el('div', 'w-full max-w-2xl fade-up')
+  boxWrap.style.animationDelay = '0.08s'
+  const box = el('div', 'hero-box px-5 pt-4 pb-3')
+  box.innerHTML = `
+    <textarea id="home-input" rows="2" placeholder="问我任何问题，或让我帮你创作…"
+      class="w-full bg-transparent resize-none outline-none text-[16px] placeholder:text-gray-400 leading-relaxed"></textarea>
+    <div class="flex items-center justify-between mt-1">
+      <div id="home-agent-tag" class="flex items-center gap-1.5 text-[13px] text-gray-500 bg-gray-100 hover:bg-gray-200 rounded-full pl-1 pr-3 py-1 cursor-default transition"></div>
+      <button id="home-send" class="w-9 h-9 rounded-full bg-brand hover:bg-brand-dark text-white flex items-center justify-center transition disabled:opacity-30">
+        <i class="fas fa-arrow-up text-sm"></i>
+      </button>
+    </div>`
+  boxWrap.appendChild(box)
+  wrap.appendChild(boxWrap)
+
+  // 圆形 Agent 入口横排
+  const orbsWrap = el('div', 'w-full max-w-3xl mt-10 fade-up')
+  orbsWrap.style.animationDelay = '0.14s'
+  const orbs = el(
+    'div',
+    'flex flex-wrap items-start justify-center gap-x-6 gap-y-5'
   )
-
-  const grid = el('div', 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4')
   App.agents.forEach((a) => {
-    const card = el(
-      'button',
-      `text-left p-5 rounded-2xl border border-gray-200 hover:border-transparent hover:shadow-lg transition bg-white group`
-    )
-    card.innerHTML = `
-      <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${a.color} text-white flex items-center justify-center text-xl mb-3">
-        <i class="fas ${iconFix(a.icon)}"></i>
-      </div>
-      <h3 class="font-bold text-gray-800 group-hover:text-indigo-600 transition">${a.name}</h3>
-      <p class="text-xs text-gray-500 mt-1">${a.tagline}</p>
-      <div class="flex flex-wrap gap-1 mt-3">
-        ${a.capabilities
-          .map(
-            (c) =>
-              `<span class="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">${c}</span>`
-          )
-          .join('')}
-      </div>`
-    card.onclick = () => startConversation(a)
-    grid.appendChild(card)
+    const pill = el('button', 'agent-pill flex flex-col items-center gap-2 w-[76px] group')
+    pill.innerHTML = `
+      <span class="agent-orb">
+        <i class="fas ${iconFix(a.icon)} bg-gradient-to-br ${a.color} bg-clip-text text-transparent"></i>
+      </span>
+      <span class="text-[12px] text-gray-600 group-hover:text-gray-900 text-center leading-tight transition">${a.name}</span>`
+    pill.onclick = () => selectHomeAgent(a)
+    orbs.appendChild(pill)
   })
-  wrap.appendChild(grid)
+  orbsWrap.appendChild(orbs)
+  wrap.appendChild(orbsWrap)
+
+  // 提示条
+  const tip = el('div', 'mt-10 text-[12px] text-gray-400 fade-up text-center')
+  tip.style.animationDelay = '0.2s'
+  tip.innerHTML = '基于 Hono · Cloudflare 构建 · 借鉴 OpenHands 与 Genspark 的智能体逻辑'
+  wrap.appendChild(tip)
+
   content.appendChild(wrap)
+
+  // 绑定首页事件
+  const homeInput = $('#home-input')
+  homeInput.addEventListener('input', () => autoGrow(homeInput))
+  homeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      submitFromHome()
+    }
+  })
+  $('#home-send').onclick = submitFromHome
+  setTimeout(() => homeInput.focus(), 100)
+
+  // 默认选中通用助手
+  const def = App.agents.find((a) => a.id === App.homeSelectedAgent) || App.agents[0]
+  updateHomeAgentTag(def)
 }
 
-// FontAwesome 没有 elephant 免费图标，做个映射
-function iconFix(icon) {
-  if (icon === 'fa-elephant') return 'fa-robot'
-  return icon
+function selectHomeAgent(agent) {
+  App.homeSelectedAgent = agent.id
+  updateHomeAgentTag(agent)
+  const input = $('#home-input')
+  if (input) input.focus()
+  // 高亮选中的 orb
+  document.querySelectorAll('.agent-pill').forEach((p, i) => {
+    const active = App.agents[i] && App.agents[i].id === agent.id
+    const orb = p.querySelector('.agent-orb')
+    if (orb) orb.style.borderColor = active ? '#2563eb' : '#e5e7eb'
+  })
 }
 
-// ---------- 新建会话 ----------
+function updateHomeAgentTag(agent) {
+  const tag = $('#home-agent-tag')
+  if (!tag) return
+  tag.innerHTML = `
+    <span class="w-6 h-6 rounded-full bg-gradient-to-br ${agent.color} text-white flex items-center justify-center text-[11px]"><i class="fas ${iconFix(
+    agent.icon
+  )}"></i></span>
+    <span>${agent.name}</span>`
+}
+
+async function submitFromHome() {
+  const input = $('#home-input')
+  const text = (input?.value || '').trim()
+  const agent = App.agents.find((a) => a.id === App.homeSelectedAgent) || App.agents[0]
+  if (!text) {
+    // 没输入则进入该 agent 的欢迎页
+    await startConversation(agent)
+    return
+  }
+  await startConversation(agent)
+  $('#input').value = text
+  await sendMessage()
+}
+
+// ============================================================
+//  会话
+// ============================================================
 async function startConversation(agent, existingConv) {
   App.currentAgent = agent
   $('#current-agent').innerHTML = `
@@ -105,6 +183,7 @@ async function startConversation(agent, existingConv) {
     agent.icon
   )}"></i></span>
     <span>${agent.name}</span>`
+  $('#sidebar').classList.remove('open')
 
   if (existingConv) {
     App.currentConv = existingConv
@@ -128,20 +207,22 @@ async function startConversation(agent, existingConv) {
 function renderWelcome(agent) {
   const content = $('#content')
   content.innerHTML = ''
-  const wrap = el('div', 'max-w-3xl mx-auto px-4 py-10 fade-in text-center')
+  const wrap = el('div', 'max-w-3xl mx-auto px-4 py-12 fade-in text-center')
   wrap.innerHTML = `
-    <div class="w-16 h-16 rounded-2xl bg-gradient-to-br ${agent.color} text-white flex items-center justify-center text-2xl mx-auto mb-4">
-      <i class="fas ${iconFix(agent.icon)}"></i>
+    <div class="agent-orb mx-auto mb-4" style="border-color:transparent;background:none;">
+      <span class="w-14 h-14 rounded-full bg-gradient-to-br ${agent.color} text-white flex items-center justify-center text-2xl"><i class="fas ${iconFix(
+    agent.icon
+  )}"></i></span>
     </div>
     <h2 class="text-xl font-bold text-gray-800">${agent.name}</h2>
-    <p class="text-gray-500 mt-1 mb-6">${agent.description}</p>`
+    <p class="text-gray-500 mt-2 mb-7 text-sm max-w-md mx-auto">${agent.description}</p>`
   const grid = el('div', 'grid grid-cols-1 sm:grid-cols-2 gap-3 text-left')
   agent.starters.forEach((s) => {
     const b = el(
       'button',
-      'p-3 rounded-xl border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 text-sm text-gray-700 transition'
+      'p-3.5 rounded-2xl border border-gray-200 hover:border-brand hover:bg-blue-50/40 text-sm text-gray-700 transition flex items-start gap-2.5'
     )
-    b.innerHTML = `<i class="fas fa-lightbulb text-amber-400 mr-2"></i>${s}`
+    b.innerHTML = `<i class="fas fa-arrow-up-right-from-square text-brand/70 text-xs mt-1"></i><span>${s}</span>`
     b.onclick = () => {
       $('#input').value = s
       sendMessage()
@@ -152,7 +233,6 @@ function renderWelcome(agent) {
   content.appendChild(wrap)
 }
 
-// ---------- 消息列表渲染 ----------
 function ensureMsgContainer() {
   let list = $('#msg-list')
   if (!list) {
@@ -170,18 +250,20 @@ function appendMessage(role, content) {
   const row = el('div', 'flex gap-3 fade-in ' + (role === 'user' ? 'flex-row-reverse' : ''))
   const avatar = el(
     'div',
-    `shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-white text-sm ${
+    `shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white text-sm ${
       role === 'user'
-        ? 'bg-gray-700'
-        : 'bg-gradient-to-br ' + (App.currentAgent?.color || 'from-indigo-500 to-purple-500')
+        ? 'bg-gray-800'
+        : 'bg-gradient-to-br ' + (App.currentAgent?.color || 'from-blue-500 to-indigo-600')
     }`,
-    role === 'user' ? '<i class="fas fa-user"></i>' : `<i class="fas ${iconFix(App.currentAgent?.icon || 'fa-robot')}"></i>`
+    role === 'user'
+      ? '<i class="fas fa-user text-xs"></i>'
+      : `<i class="fas ${iconFix(App.currentAgent?.icon || 'fa-robot')}"></i>`
   )
   const bubble = el(
     'div',
     role === 'user'
-      ? 'max-w-[80%] bg-indigo-600 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm whitespace-pre-wrap'
-      : 'max-w-[85%] bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3 markdown-body'
+      ? 'max-w-[80%] bg-brand text-white rounded-2xl rounded-tr-md px-4 py-2.5 text-[15px] whitespace-pre-wrap'
+      : 'max-w-[85%] bg-[#f7f7f8] rounded-2xl rounded-tl-md px-4 py-3 markdown-body'
   )
   if (role === 'user') bubble.textContent = content
   else bubble.innerHTML = renderMd(content)
@@ -200,15 +282,15 @@ function scrollBottom() {
 async function loadMessages(convId) {
   const msgs = await fetch(`/api/conversations/${convId}/messages`).then((r) => r.json())
   $('#content').innerHTML = ''
-  ensureMsgContainer()
   if (!msgs.length && App.currentAgent) {
     renderWelcome(App.currentAgent)
     return
   }
+  ensureMsgContainer()
   msgs.forEach((m) => appendMessage(m.role, m.content))
 }
 
-// ---------- 发送消息（流式） ----------
+// ---------- 流式发送 ----------
 async function sendMessage() {
   if (App.streaming) return
   const input = $('#input')
@@ -219,10 +301,9 @@ async function sendMessage() {
   input.style.height = 'auto'
   appendMessage('user', text)
 
-  // 助手占位
   const bubble = appendMessage('assistant', '')
   bubble.innerHTML =
-    '<span class="thinking-dots text-gray-400"><span>●</span><span>●</span><span>●</span></span>'
+    '<span class="thinking-dots inline-flex items-center"><span></span><span></span><span></span></span>'
   App.streaming = true
   $('#send-btn').disabled = true
 
@@ -285,22 +366,23 @@ async function loadConversations() {
   const nav = $('#conv-list')
   nav.innerHTML = ''
   if (!list.length) {
-    nav.innerHTML = '<p class="text-xs text-gray-500 px-2 py-4 text-center">暂无对话</p>'
+    nav.innerHTML =
+      '<p class="text-[11px] text-gray-400 px-3 py-3 whitespace-nowrap opacity-0 group-hover/side:opacity-100 transition-opacity">暂无对话</p>'
     return
   }
   list.forEach((c) => {
     const agent = App.agents.find((a) => a.id === c.agent_type)
     const item = el(
       'div',
-      `group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer text-sm hover:bg-white/10 transition ${
-        App.currentConv?.id === c.id ? 'bg-white/15' : ''
+      `conv-item group/item flex items-center gap-2.5 h-9 px-[10px] rounded-xl cursor-pointer hover:bg-gray-200/70 transition ${
+        App.currentConv?.id === c.id ? 'bg-gray-200/80' : ''
       }`
     )
     item.dataset.id = c.id
     item.innerHTML = `
-      <i class="fas ${iconFix(agent?.icon || 'fa-comment')} text-xs text-gray-400 w-4"></i>
-      <span class="flex-1 truncate text-gray-200">${c.title}</span>
-      <button class="del-btn opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 transition"><i class="fas fa-trash text-xs"></i></button>`
+      <i class="fas ${iconFix(agent?.icon || 'fa-comment')} text-[13px] text-gray-400 w-5 text-center shrink-0"></i>
+      <span class="flex-1 truncate text-[13px] text-gray-700 whitespace-nowrap opacity-0 group-hover/side:opacity-100 transition-opacity">${c.title}</span>
+      <button class="del-btn opacity-0 group-hover/item:opacity-100 group-hover/side:inline text-gray-400 hover:text-red-500 transition shrink-0"><i class="fas fa-trash-can text-[11px]"></i></button>`
     item.onclick = (e) => {
       if (e.target.closest('.del-btn')) return
       const agentDef = App.agents.find((a) => a.id === c.agent_type) || App.agents[0]
@@ -310,7 +392,7 @@ async function loadConversations() {
       e.stopPropagation()
       if (!confirm('确定删除这个对话？')) return
       await fetch(`/api/conversations/${c.id}`, { method: 'DELETE' })
-      if (App.currentConv?.id === c.id) showAgentPicker()
+      if (App.currentConv?.id === c.id) showHome()
       await loadConversations()
     }
     nav.appendChild(item)
@@ -319,7 +401,7 @@ async function loadConversations() {
 
 function highlightConv(id) {
   document.querySelectorAll('#conv-list [data-id]').forEach((n) => {
-    n.classList.toggle('bg-white/15', n.dataset.id === id)
+    n.classList.toggle('bg-gray-200/80', n.dataset.id === id)
   })
 }
 
