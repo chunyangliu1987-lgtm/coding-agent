@@ -429,6 +429,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     trigger=request.trigger,
                     remote_workspace=remote_workspace,
                     selected_repository=request.selected_repository,
+                    selected_branch=request.selected_branch,
                     plugins=request.plugins,
                     api_secrets=request.secrets,
                 )
@@ -508,6 +509,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 llm_model = request_agent.llm.model
                 agent_kind = 'openhands'
 
+            conversation_tags: dict[str, str] = dict(tags)
+            if request.selected_repository:
+                conversation_tags['repo_name'] = request.selected_repository
+            if request.git_provider:
+                conversation_tags['git_provider'] = request.git_provider.value
+            if request.selected_branch:
+                conversation_tags['selected_branch'] = request.selected_branch
+
             app_conversation_info = AppConversationInfo(
                 id=info.id,
                 title=f'Conversation {info.id.hex[:5]}',
@@ -515,7 +524,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 created_by_user_id=user_id,
                 llm_model=llm_model,
                 agent_kind=agent_kind,
-                tags=tags,
                 # Git parameters
                 selected_repository=request.selected_repository,
                 selected_branch=request.selected_branch,
@@ -523,6 +531,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 trigger=request.trigger,
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
+                tags=conversation_tags,
             )
             await self.app_conversation_info_service.save_app_conversation_info(
                 app_conversation_info
@@ -1347,12 +1356,50 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         return llm, mcp_config
 
     @staticmethod
+    def _build_observability_context(
+        conversation_id: UUID,
+        *,
+        agent_kind: str,
+        selected_repository: str | None = None,
+        selected_branch: str | None = None,
+        git_provider: ProviderType | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Build trace metadata and tag filters for a conversation.
+
+        Metadata uses explicit field names such as ``repo_name`` and
+        ``selected_branch``. Tags intentionally keep the concise
+        ``repo:`` / ``branch:`` prefixes used by LiteLLM metadata filters.
+        """
+        metadata: dict[str, Any] = {
+            'app': 'openhands',
+            'conversation_id': str(conversation_id),
+            'agent_kind': agent_kind,
+        }
+        tags = ['app:openhands', f'agent_kind:{agent_kind}']
+
+        if selected_repository:
+            metadata['repo_name'] = selected_repository
+            tags.append(f'repo:{selected_repository}')
+        if selected_branch:
+            metadata['selected_branch'] = selected_branch
+            tags.append(f'branch:{selected_branch}')
+        if git_provider:
+            provider = git_provider.value
+            metadata['git_provider'] = provider
+            tags.append(f'git_provider:{provider}')
+
+        return metadata, tags
+
+    @staticmethod
     def _apply_server_agent_overrides(
         agent: Agent,
         agent_type: AgentType,
         mcp_config: dict,
         conversation_id: UUID,
         user_id: str | None,
+        repo_name: str | None = None,
+        git_provider: ProviderType | None = None,
+        selected_branch: str | None = None,
     ) -> Agent:
         """Apply server-only fields that have no place in ``AgentSettings``.
 
@@ -1375,6 +1422,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 llm_type=agent.llm.usage_id or 'agent',
                 conversation_id=conversation_id,
                 user_id=user_id,
+                repo_name=repo_name,
+                git_provider=git_provider.value if git_provider else None,
+                selected_branch=selected_branch,
             )
             overrides['llm'] = agent.llm.model_copy(
                 update={'litellm_extra_body': {'metadata': llm_metadata}}
@@ -1392,6 +1442,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     llm_type='condenser',
                     conversation_id=conversation_id,
                     user_id=user_id,
+                    repo_name=repo_name,
+                    git_provider=git_provider.value if git_provider else None,
+                    selected_branch=selected_branch,
                 )
                 condenser_updates['litellm_extra_body'] = {
                     'metadata': condenser_metadata
@@ -1529,6 +1582,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         trigger: ConversationTrigger | None = None,
         remote_workspace: AsyncRemoteWorkspace | None = None,
         selected_repository: str | None = None,
+        selected_branch: str | None = None,
         plugins: list[PluginSpec] | None = None,
         api_secrets: dict[str, SecretStr] | None = None,
     ) -> StartConversationRequest:
@@ -1554,6 +1608,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             trigger: Optional conversation trigger.
             remote_workspace: Optional remote workspace instance
             selected_repository: Optional repository name
+            selected_branch: Optional selected branch name
             plugins: Optional list of plugins to load
             api_secrets: Optional secrets passed directly via the API.
                 These are merged with existing secrets (from database
@@ -1572,6 +1627,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 trigger=trigger,
                 working_dir=working_dir,
                 selected_repository=selected_repository,
+                selected_branch=selected_branch,
+                git_provider=git_provider,
                 plugins=plugins,
                 api_secrets=api_secrets,
             )
@@ -1700,7 +1757,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
 
         agent = self._apply_server_agent_overrides(
-            agent, agent_type, mcp_config, conversation_id, user.id
+            agent,
+            agent_type,
+            mcp_config,
+            conversation_id,
+            user.id,
+            repo_name=selected_repository,
+            git_provider=git_provider,
+            selected_branch=selected_branch,
         )
 
         # --- hooks (require remote workspace; must precede request build) -----
@@ -1738,6 +1802,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 for p in plugins
             ]
 
+        observability_metadata, observability_tags = self._build_observability_context(
+            conversation_id,
+            agent_kind='openhands',
+            selected_repository=selected_repository,
+            selected_branch=selected_branch,
+            git_provider=git_provider,
+        )
+
         # --- populate ConversationSettings and build request ----------------
         conv_settings = user.conversation_settings.model_copy(
             update={
@@ -1763,7 +1835,11 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         # fallback.
         laminar_user_id = await self.user_context.get_user_email() or user.id
         request = conv_settings.create_request(
-            StartConversationRequest, agent=agent, user_id=laminar_user_id
+            StartConversationRequest,
+            agent=agent,
+            observability_metadata=observability_metadata,
+            observability_tags=observability_tags,
+            user_id=laminar_user_id,
         )
 
         # --- skills (require remote workspace) ------------------------------
@@ -1817,6 +1893,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         system_message_suffix: str | None = None,
         trigger: ConversationTrigger | None = None,
         selected_repository: str | None = None,
+        selected_branch: str | None = None,
+        git_provider: ProviderType | None = None,
         plugins: list[PluginSpec] | None = None,
         api_secrets: dict[str, SecretStr] | None = None,
     ) -> StartConversationRequest:
@@ -1840,6 +1918,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             system_message_suffix: Optional suffix for system message.
             trigger: Optional conversation trigger.
             selected_repository: Optional repository name
+            selected_branch: Optional selected branch name
+            git_provider: Optional git provider type
             plugins: Optional list of plugins to load
             api_secrets: Optional secrets passed directly via the API.
         """
@@ -1937,6 +2017,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 for p in plugins
             ]
 
+        observability_metadata, observability_tags = self._build_observability_context(
+            conversation_id,
+            agent_kind='acp',
+            selected_repository=selected_repository,
+            selected_branch=selected_branch,
+            git_provider=git_provider,
+        )
+
         # Mirror the regular path: populate ConversationSettings and delegate
         # to create_request() so that max_iterations, confirmation_mode, and
         # security_analyzer flow through to ACP conversations too.
@@ -1958,6 +2046,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         return conv_settings.create_request(
             StartConversationRequest,
             agent=acp_agent,
+            observability_metadata=observability_metadata,
+            observability_tags=observability_tags,
             user_id=laminar_user_id,
             secrets=secrets,
         )
