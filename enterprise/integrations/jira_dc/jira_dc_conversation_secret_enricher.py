@@ -43,12 +43,23 @@ def _workspace_matches_configured_jira_dc_host(workspace_name: str) -> bool:
     return workspace_name.lower() == configured_host.lower()
 
 
+JIRA_DC_NO_TOKEN_HINT = """You do not have a Jira Data Center API token in this conversation, so you cannot query Jira directly. Any Jira issue context you need is included above. If the user asks you to read or query Jira directly, let them know they can enable it by linking their Jira account in OpenHands under Settings → Integrations."""
+
+
 def _append_jira_dc_hint(system_message_suffix: str | None) -> str:
     if not system_message_suffix:
         return JIRA_DC_SECRET_HINT
     if 'JIRA_DC_TOKEN' in system_message_suffix:
         return system_message_suffix
     return f'{system_message_suffix}\n\n{JIRA_DC_SECRET_HINT}'
+
+
+def _append_no_token_hint(system_message_suffix: str | None) -> str:
+    if not system_message_suffix:
+        return JIRA_DC_NO_TOKEN_HINT
+    if JIRA_DC_NO_TOKEN_HINT in system_message_suffix:
+        return system_message_suffix
+    return f'{system_message_suffix}\n\n{JIRA_DC_NO_TOKEN_HINT}'
 
 
 async def _get_effective_org_id(user_context: UserContext) -> UUID | None:
@@ -138,11 +149,10 @@ class JiraDcConversationSecretEnricher(ConversationSecretEnricher):
         # Identity is resolved via user_context; `user` is required only by the interface.
         del user
 
-        if not JIRA_DC_ENABLE_OAUTH:
-            return ConversationSecretEnrichment(
-                system_message_suffix=system_message_suffix
-            )
-
+        # Not gated on JIRA_DC_ENABLE_OAUTH: inject a token whenever the user has
+        # one, so an email-linking deployment can still let users opt into OAuth
+        # for live Jira access. Email-only users have no token and are handled
+        # below (best-effort), so the resolver's baked-in context carries them.
         user_id = await user_context.get_user_id()
         if not user_id:
             return ConversationSecretEnrichment(
@@ -178,11 +188,12 @@ class JiraDcConversationSecretEnricher(ConversationSecretEnricher):
         }
 
         token_manager = TokenManager()
-        strict = trigger == ConversationTrigger.JIRA
+        # Only an OAuth-mode Jira resolver start hard-fails on a missing token (so
+        # the webhook can post the re-link prompt). Email mode is always
+        # best-effort: inject if the user opted into OAuth, otherwise skip.
+        strict = trigger == ConversationTrigger.JIRA and bool(JIRA_DC_ENABLE_OAUTH)
         if web_url:
             if strict:
-                # Jira resolver starts must fail before launching the sandbox so
-                # the webhook manager can post the existing re-link prompt.
                 await _resolve_user_token(
                     user_id=user_id,
                     workspace_id=workspace.id,
@@ -190,6 +201,25 @@ class JiraDcConversationSecretEnricher(ConversationSecretEnricher):
                     store=store,
                     strict=True,
                 )
+            elif not JIRA_DC_ENABLE_OAUTH:
+                # The LookupSecret resolves lazily, so in email mode pre-check that
+                # the user actually has a token -- else we'd inject a dud secret and
+                # the success hint would wrongly claim Jira access.
+                if (
+                    await _resolve_user_token(
+                        user_id=user_id,
+                        workspace_id=workspace.id,
+                        token_manager=token_manager,
+                        store=store,
+                        strict=False,
+                    )
+                    is None
+                ):
+                    return ConversationSecretEnrichment(
+                        system_message_suffix=_append_no_token_hint(
+                            system_message_suffix
+                        )
+                    )
             access_token = jwt_service.create_jws_token(
                 payload={
                     'user_id': user_id,
@@ -214,7 +244,7 @@ class JiraDcConversationSecretEnricher(ConversationSecretEnricher):
             )
             if user_token is None:
                 return ConversationSecretEnrichment(
-                    system_message_suffix=system_message_suffix
+                    system_message_suffix=_append_no_token_hint(system_message_suffix)
                 )
             secrets['JIRA_DC_TOKEN'] = StaticSecret(
                 value=user_token.access_token,
