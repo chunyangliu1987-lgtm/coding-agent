@@ -221,6 +221,16 @@ class AppConversationStartRequest(OpenHandsModel):
     selected_repository: str | None = None
     selected_branch: str | None = None
     git_provider: ProviderType | None = None
+    dependency_repos: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Additional repositories to clone alongside the selected_repository. '
+            'Each entry should be in "owner/repo" format '
+            '(e.g., "All-Hands-AI/OpenHands"). '
+            'These repositories will be cloned into the workspace alongside the '
+            'main repo. Clone failures are non-fatal and will be logged as warnings.'
+        ),
+    )
     suggested_task: SuggestedTask | None = None
     title: str | None = None
     trigger: ConversationTrigger | None = None
@@ -304,6 +314,13 @@ class AppConversationStartTask(OpenHandsModel):
     )
     agent_server_url: str | None = Field(
         default=None, description='The agent server url, if READY'
+    )
+    dependency_repos_cloned: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Absolute sandbox paths of any dependency repositories that were '
+            'cloned for this conversation.'
+        ),
     )
     request: AppConversationStartRequest
     created_at: datetime = Field(default_factory=utc_now)

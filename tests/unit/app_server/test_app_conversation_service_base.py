@@ -775,6 +775,7 @@ async def test_clone_or_init_git_repo_uses_shallow_clone_by_default(mock_workspa
         bind_methods=(
             'clone_or_init_git_repo',
             '_get_azure_devops_bearer_token_for_git',
+            '_build_git_clone_command',
         ),
     )
     service.init_git_in_empty_workspace = True
@@ -787,6 +788,7 @@ async def test_clone_or_init_git_repo_uses_shallow_clone_by_default(mock_workspa
         selected_repository='owner/repo',
         selected_branch=None,
         git_provider=ProviderType.GITHUB,
+        dependency_repos=[],
     )
 
     await service.clone_or_init_git_repo(task, mock_workspace)
@@ -806,6 +808,7 @@ async def test_clone_or_init_git_repo_shallow_clones_selected_branch(mock_worksp
         bind_methods=(
             'clone_or_init_git_repo',
             '_get_azure_devops_bearer_token_for_git',
+            '_build_git_clone_command',
         ),
     )
     service.init_git_in_empty_workspace = True
@@ -818,6 +821,7 @@ async def test_clone_or_init_git_repo_shallow_clones_selected_branch(mock_worksp
         selected_repository='owner/repo',
         selected_branch='feature-branch',
         git_provider=ProviderType.GITHUB,
+        dependency_repos=[],
     )
 
     await service.clone_or_init_git_repo(task, mock_workspace)
@@ -839,6 +843,7 @@ async def test_clone_or_init_git_repo_preserves_full_clone_when_enabled(
         bind_methods=(
             'clone_or_init_git_repo',
             '_get_azure_devops_bearer_token_for_git',
+            '_build_git_clone_command',
         ),
     )
     service.init_git_in_empty_workspace = True
@@ -851,6 +856,7 @@ async def test_clone_or_init_git_repo_preserves_full_clone_when_enabled(
         selected_repository='owner/repo',
         selected_branch='feature-branch',
         git_provider=ProviderType.GITHUB,
+        dependency_repos=[],
     )
 
     await service.clone_or_init_git_repo(task, mock_workspace)
@@ -874,6 +880,7 @@ async def test_clone_or_init_git_repo_quotes_selected_branch_before_checkout(
         bind_methods=(
             'clone_or_init_git_repo',
             '_get_azure_devops_bearer_token_for_git',
+            '_build_git_clone_command',
         ),
     )
     service.init_git_in_empty_workspace = True
@@ -885,6 +892,7 @@ async def test_clone_or_init_git_repo_quotes_selected_branch_before_checkout(
     task.request = Mock(
         selected_repository='owner/repo',
         selected_branch='feature>tmp',
+        dependency_repos=[],
     )
 
     await service.clone_or_init_git_repo(task, mock_workspace)
@@ -906,6 +914,7 @@ async def test_clone_or_init_git_repo_configures_dynamic_azure_devops_helper(
             'clone_or_init_git_repo',
             '_get_azure_devops_bearer_token_for_git',
             '_configure_azure_devops_git_credential_helper',
+            '_build_git_clone_command',
         ),
     )
     service.init_git_in_empty_workspace = True
@@ -920,6 +929,7 @@ async def test_clone_or_init_git_repo_configures_dynamic_azure_devops_helper(
         selected_repository='org/project/repo',
         selected_branch='main',
         git_provider=ProviderType.AZURE_DEVOPS,
+        dependency_repos=[],
     )
     sandbox = SandboxInfo(
         id='sandbox-123',
@@ -1401,3 +1411,238 @@ class TestLoadAndMergeAllSkills:
 
             # Assert
             assert result == []
+
+
+class TestCloneDependencyRepos:
+    """Tests for _clone_dependency_repos method."""
+
+    def _make_service(
+        self,
+        authenticated_url: str | None = 'https://token@github.com/owner/dep-repo.git',
+    ):
+        """Create a real AppConversationServiceBase instance with mocked user_context."""
+        mock_user_context = Mock(spec=UserContext)
+        mock_user_context.get_authenticated_git_url = AsyncMock(
+            return_value=authenticated_url
+        )
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=False,
+                user_context=mock_user_context,
+            )
+        return service
+
+    def _make_workspace(self, exit_code: int = 0):
+        """Create a mock workspace."""
+        workspace = Mock()
+        workspace.working_dir = '/workspace'
+        workspace.execute_command = AsyncMock(
+            return_value=MockCommandResult(exit_code=exit_code)
+        )
+        return workspace
+
+    @pytest.mark.asyncio
+    async def test_clones_single_dependency_repo_successfully(self):
+        """Successfully clones a single dependency repo into the project dir."""
+        service = self._make_service()
+        workspace = self._make_workspace(exit_code=0)
+
+        result = await service._clone_dependency_repos(
+            ['owner/dep-repo'], workspace, project_dir='/workspace/repo'
+        )
+
+        # Returns the absolute path inside the project dir.
+        assert result == ['/workspace/repo/dep-repo']
+        workspace.execute_command.assert_awaited_once()
+        call = workspace.execute_command.call_args
+        assert 'git clone' in call.args[0]
+        assert 'dep-repo' in call.args[0]
+        # Cloned into the project dir, not the workspace parent.
+        assert call.args[1] == '/workspace/repo'
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_workspace_working_dir(self):
+        """Falls back to workspace.working_dir when project_dir is omitted."""
+        service = self._make_service()
+        workspace = self._make_workspace(exit_code=0)
+
+        result = await service._clone_dependency_repos(['owner/dep-repo'], workspace)
+
+        assert result == ['/workspace/dep-repo']
+        assert workspace.execute_command.call_args.args[1] == '/workspace'
+
+    @pytest.mark.asyncio
+    async def test_clones_multiple_dependency_repos(self):
+        """Clones multiple dependency repos and returns all successful paths."""
+        service = self._make_service()
+        workspace = self._make_workspace(exit_code=0)
+
+        result = await service._clone_dependency_repos(
+            ['owner/repo-a', 'owner/repo-b'], workspace, project_dir='/workspace/repo'
+        )
+
+        assert result == ['/workspace/repo/repo-a', '/workspace/repo/repo-b']
+        assert workspace.execute_command.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_skips_repo_when_no_authenticated_url(self):
+        """Skips a repo if no authenticated URL can be obtained."""
+        service = self._make_service(authenticated_url=None)
+        workspace = self._make_workspace()
+
+        result = await service._clone_dependency_repos(
+            ['owner/private-repo'], workspace, project_dir='/workspace/repo'
+        )
+
+        assert result == []
+        workspace.execute_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_fatal_on_clone_failure(self):
+        """A clone failure is non-fatal: logs warning and continues."""
+        service = self._make_service()
+        workspace = self._make_workspace(exit_code=1)
+
+        result = await service._clone_dependency_repos(
+            ['owner/bad-repo'], workspace, project_dir='/workspace/repo'
+        )
+
+        assert result == []
+        workspace.execute_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_success_when_one_repo_fails(self):
+        """Returns only successfully cloned repos when some fail."""
+        service = self._make_service()
+        workspace = Mock()
+        workspace.working_dir = '/workspace'
+        workspace.execute_command = AsyncMock(
+            side_effect=[
+                MockCommandResult(exit_code=0),  # repo-a succeeds
+                MockCommandResult(exit_code=1, stderr='auth error'),  # repo-b fails
+                MockCommandResult(exit_code=0),  # repo-c succeeds
+            ]
+        )
+
+        result = await service._clone_dependency_repos(
+            ['owner/repo-a', 'owner/repo-b', 'owner/repo-c'],
+            workspace,
+            project_dir='/workspace/repo',
+        )
+
+        assert result == ['/workspace/repo/repo-a', '/workspace/repo/repo-c']
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_empty(self):
+        """Empty dependency_repos list returns empty result immediately."""
+        service = self._make_service()
+        workspace = self._make_workspace()
+
+        result = await service._clone_dependency_repos(
+            [], workspace, project_dir='/workspace/repo'
+        )
+
+        assert result == []
+        workspace.execute_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_fatal_on_unexpected_exception(self):
+        """An unexpected exception during clone is caught and logged."""
+        service = self._make_service()
+        workspace = Mock()
+        workspace.working_dir = '/workspace'
+        workspace.execute_command = AsyncMock(side_effect=RuntimeError('boom'))
+
+        result = await service._clone_dependency_repos(
+            ['owner/repo'], workspace, project_dir='/workspace/repo'
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_azure_dependency_repo_reuses_bearer_header_and_helper(self):
+        """Azure DevOps dependency repos reuse the bearer header + helper.
+
+        Regression test for the original implementation, which used a plain
+        ``git clone`` for dependency repos and silently failed for Azure
+        DevOps OAuth/JWT URLs.
+        """
+        mock_user_context = Mock(spec=UserContext)
+        mock_user_context.get_authenticated_git_url = AsyncMock(
+            return_value='https://dev.azure.com/org/project/_git/dep'
+        )
+        mock_user_context.get_latest_token = AsyncMock(
+            return_value='header.payload.signature'
+        )
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=False,
+                user_context=mock_user_context,
+            )
+        service.web_url = None
+        workspace = self._make_workspace(exit_code=0)
+        sandbox = SandboxInfo(
+            id='sandbox-123',
+            created_by_user_id='user-123',
+            sandbox_spec_id='spec-123',
+            status=SandboxStatus.RUNNING,
+            session_api_key='session-key',
+        )
+
+        result = await service._clone_dependency_repos(
+            ['org/project/dep'],
+            workspace,
+            project_dir='/workspace/repo',
+            sandbox=sandbox,
+        )
+
+        assert result == ['/workspace/repo/dep']
+        commands = [c.args[0] for c in workspace.execute_command.call_args_list]
+        assert any(
+            "git -c http.extraheader='Authorization: Bearer header.payload.signature'"
+            ' clone' in cmd
+            for cmd in commands
+        )
+        assert any(
+            'openhands-azure-devops-credential-helper' in cmd for cmd in commands
+        )
+
+    @pytest.mark.asyncio
+    async def test_clone_or_init_clones_dependencies_into_project_dir(self):
+        """End-to-end: clone_or_init_git_repo clones deps under the project dir.
+
+        Exercises the real ``clone_or_init_git_repo`` flow with a primary repo
+        plus dependencies and asserts the dependency clones run inside the
+        primary repo directory (the agent's project root) and are recorded on
+        the task as absolute paths.
+        """
+        mock_user_context = Mock(spec=UserContext)
+        mock_user_context.get_user_info = AsyncMock(return_value=MockUserInfo())
+        mock_user_context.get_authenticated_git_url = AsyncMock(
+            side_effect=lambda repo: f'https://token@github.com/{repo}.git'
+        )
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=False,
+                user_context=mock_user_context,
+            )
+        workspace = self._make_workspace(exit_code=0)
+        workspace.working_dir = '/workspace'
+        task = Mock()
+        task.request = Mock(
+            selected_repository='owner/primary',
+            selected_branch='main',
+            git_provider=None,
+            dependency_repos=['owner/dep-a', 'owner/dep-b'],
+        )
+        task.dependency_repos_cloned = []
+
+        await service.clone_or_init_git_repo(task, workspace)
+
+        assert task.dependency_repos_cloned == [
+            '/workspace/primary/dep-a',
+            '/workspace/primary/dep-b',
+        ]
+        cwds = [c.args[1] for c in workspace.execute_command.call_args_list]
+        # Dependency clones run inside the primary repo (the project dir).
+        assert cwds.count('/workspace/primary') == 2
